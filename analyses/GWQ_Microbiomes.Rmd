@@ -36,7 +36,7 @@ require("dplyr"); require("reshape2"); require("picante"); require("phyloseq")
 # Import Environmental Data
 design <- read.csv("../data/GWQ_env.csv")
 ```
-## Bacterial Data - including bulk and tea
+## Bacterial Data
 ```{r Import Files - Bacteria, include=FALSE}
 # Import OTU data
 # Import Raw Data
@@ -51,7 +51,7 @@ otu.in <- read.otu("../data/GWQ.bac.final.shared")
 #dim(otu)
 
 # OTU table - remove otus w/ < 2 occurrences across all sites
-otus <- otu.in[, which(colSums(otu.in) >= 2)]
+otus <- otu.in[, which(colSums(otu.in) >= 10)]
 dim(otus)
 
 # Make Presence Absence Matrix
@@ -67,37 +67,255 @@ for(i in 1:dim(otus)[1]){
 otu.tax <- read.tax(taxonomy = "../data/GWQ.bac.final.taxonomy",
                    format = "rdp", tax.levels = 6, col.tax = 3)
 ```
+## Subset E. coli positive only
+```{r Ecoli positive, include=FALSE}
+# combine design and micro dataframes
+micro_env <- cbind(design,otus)
 
-# Simple Hypothesis Testing - Microbes
-```{r redundancy analysis - Bacteria, echo=TRUE}
-# RDA (full data - works)
-new.data <-cbind(design,dataREL)
-rda.2 <- rda(decostand(otus, "hell") ~  nitrate+Timepoint, data=design, na=na.omit)
-RsquareAdj(rda.2)
+# subset TotCol_PA
+ColPos <- subset(micro_env, TotCol_PA >=1)
+dim(ColPos)
+dim(design)
+design <- (ColPos[,c(1:7)])
+dim(design)
+otus <- (ColPos[,-c(1:7)])
+dim(otus)
 
-# TEST SUBSET DATA (works)
-otus.sub <- otus[(1:10),(1:10)]
-design.sub <- design[(1:10),]
-dataREL.sub <- otus.sub
-for(i in 1:dim(otus.sub)[1]){
-  dataREL.sub[i,] <- otus.sub[i,]/sum(otus.sub[i,])
-} 
+dataREL <- otus
+for(i in 1:dim(otus)[1]){
+  dataREL[i,] <- otus[i,]/sum(otus[i,])
+}
 
-rda(dataREL.sub ~ nitrate, data=design.sub, na=na.omit)
+micro_env_sub <- cbind(design,dataREL)
 
-new.data <-cbind(design.sub,dataREL.sub)
-adonis = adonis(new.data[,-c(1:5)]~nitrate, method = "bray", data = new.data, perm=1000)
-adonis
+# indicator for individual samples
+library("labdsv")
+design.type <- micro_env_sub$Timepoint
+#design.type <- micro_env_sub[,c(3)] #dropped 
+dataREL.t <- micro_env_sub[,-c(1:7)]
+design.t <- micro_env_sub[,c(1:7)]
+dataREL <- dataREL.t[, colSums(dataREL.t) > 0.05] # dominant subset
+design.dataREL <- cbind(design.t,dataREL)
 
-rda(otus.sub ~ nitrate, data=design.sub)
+colnames <- colnames(dataREL)
+tax.list <- as.data.frame(colnames)
 
-rda.1 <- rda(decostand(otus.sub, "hell") ~  nitrate, data=design.sub)
-RsquareAdj(rda.1)
+ind.tax <- otu.tax[which(as.character(otu.tax$OTU) %in% tax.list$colnames), ]
+ind.tax <- ind.tax[match(ind.tax$OTU, tax.list$colnames), ]
+
+# Export OTU Table
+write.table(ind.tax, "../data/DominantTaxa_ColPos.txt",
+            sep="\t", row.names = F, quote = F)
+
+# Export OTU Table
+write.table(design.dataREL, "../data/dataREL_ColPos.txt",
+            sep="\t", row.names = F, quote = F)
 ```
-# Bacterial Ordinations
+# Diversity Metrics - Hypothesis Testing
+```{r Diversity Metrics - Bacteria, echo=TRUE}
+# OTU table - removed low abundance samples
+otu_low_remov <- otus[which(rowSums(otus) >= 1000), ]
+dim(otu_low_remov)
+
+rownames <- rownames(otus)
+row.names(design) <- rownames
+  
+odd.sites <- otus[which(rowSums(otus) < 1000), ]
+odd.sites <- rownames(odd.sites)
+
+#aa <- (rowSums(otus))
+
+# OTU table - odd sites in bacterial composition data and remove in design file
+design_final <- design[setdiff(rownames(design), odd.sites), ]
+all.equal(rownames(design_final), rownames(otu_low_remov))
+
+min(rowSums(otu_low_remov))
+
+otus <- otu_low_remov
+```
+# Diversity Metrics - Hypothesis Testing
+```{r Diversity Metrics - Bacteria, echo=TRUE}
+otus.r <- rrarefy(otus, 1000)
+
+# Fisher's Alpha
+fisher <- fisher.alpha(otus.r)
+
+# Species Richness
+#richness <- rowSums((PWESdata.r >= 1))
+richness <- rowSums((otus >= 1))
+
+# Shannon Diversity
+shannon <- diversity(otus.r, "shannon")
+
+# Simpson's Evenness
+simp.even <- apply(otus.r, 1, simp_even)
+
+#Pielou’s evenness
+J <- shannon/log(specnumber(otus.r[,-c(1:1)]))
+
+#combined richness, diversity, evenness
+diversity <- cbind(design_final,richness,shannon,simp.even,J)
+write.csv(diversity,"../data/diversity.bact.raw.csv")
+
+diversity$TotCol_PA <- as.factor(diversity$TotCol_PA)
+
+richness.lm <- lm(richness ~ TotCol_PA+Timepoint, diversity)
+plot(richness.lm)
+anova(richness.lm)
+
+shannon.lm <- lm(shannon ~ TotCol_PA+Timepoint, diversity)
+plot(shannon.lm)
+anova(shannon.lm)
+
+evenness.lm <- lm(simp.even ~ TotCol_PA+Timepoint, diversity)
+plot(evenness.lm)
+anova(evenness.lm)
+
+# Graphing Shannon Diversity - Timepoint
+p <- ggplot(diversity, aes(x=TotCol_PA, y=shannon, color=TotCol_PA))+ geom_boxplot() +
+      geom_point(aes(color=factor(TotCol_PA)), size=2, position = position_jitterdodge()) + scale_color_manual(name="Coliform Bacteria Status", values=c("gray70", "darkgreen"), labels = c("negative", "positive")) 
+shannon<-p + theme_bw() + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line 
+          =element_line(colour = "black")) + 
+    theme(axis.title=element_text(vjust=1,size=14,face="bold"),
+          axis.text=element_text(size=14), axis.text.x = element_text(vjust=0.65, hjust=0.5, 
+          size=14), panel.border = element_rect(colour = "black",size=1)) + 
+    theme(axis.ticks.length=unit(0.3,"cm")) + labs(x = "", y = "Shannon Diversity Index (H')") + 
+    theme(strip.text.x = element_text(size=14, face="bold"), strip.text.y =   
+          element_text(size=14, face="bold"), strip.background = element_rect(colour="black",
+          fill="white", size=1)) +
+    scale_x_discrete(breaks=c("0","1"), labels=c("negative", "positive")) + theme(legend.position="none")
+shannon
+ggsave("../figures/shannon.png", plot=last_plot(), device=NULL, path=NULL, scale=1, width=7, height=5, dpi=300, limitsize=TRUE)
+
+# Graphing Richness
+p <- ggplot(diversity, aes(x=TotCol_PA, y=richness, color=TotCol_PA))+ geom_boxplot() +
+      geom_point(aes(color=factor(TotCol_PA)), size=2, position = position_jitterdodge()) + scale_color_manual(name="Coliform Bacteria Status", values=c("gray70", "darkgreen"), labels = c("negative", "positive")) 
+richness<-p + theme_bw() + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line 
+          =element_line(colour = "black")) + 
+    theme(axis.title=element_text(vjust=1,size=14,face="bold"),
+          axis.text=element_text(size=14), axis.text.x = element_text(vjust=0.65, hjust=0.5, 
+          size=14), panel.border = element_rect(colour = "black",size=1)) + 
+    theme(axis.ticks.length=unit(0.3,"cm")) + labs(x = "", y = "OTU Richness") + 
+    theme(strip.text.x = element_text(size=14, face="bold"), strip.text.y =   
+          element_text(size=14, face="bold"), strip.background = element_rect(colour="black",
+          fill="white", size=1)) +
+    scale_x_discrete(breaks=c("0","1"), labels=c("negative", "positive")) + theme(legend.position="none")
+richness
+ggsave("../figures/richness.png", plot=last_plot(), device=NULL, path=NULL, scale=1, width=7, height=5, dpi=300, limitsize=TRUE)
+
+# Graphing Simpson's Evenness
+p <- ggplot(diversity, aes(x=TotCol_PA, y=simp.even, color=TotCol_PA))+ geom_boxplot() +
+      geom_point(aes(color=factor(TotCol_PA)), size=2, position = position_jitterdodge()) + scale_color_manual(name="Coliform Bacteria Status", values=c("gray70", "darkgreen"), labels = c("negative", "positive")) 
+evenness<-p + theme_bw() + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line 
+          =element_line(colour = "black")) + 
+    theme(axis.title=element_text(vjust=1,size=14,face="bold"),
+          axis.text=element_text(size=14), axis.text.x = element_text(vjust=0.65, hjust=0.5, 
+          size=14), panel.border = element_rect(colour = "black",size=1)) + 
+    theme(axis.ticks.length=unit(0.3,"cm")) + labs(x = "Coliform Bacteria Status", y = "Simpson's Evenness") + 
+    theme(strip.text.x = element_text(size=14, face="bold"), strip.text.y =   
+          element_text(size=14, face="bold"), strip.background = element_rect(colour="black",
+          fill="white", size=1)) +
+    scale_x_discrete(breaks=c("0","1"), labels=c("negative", "positive")) + theme(legend.position="none")
+evenness
+ggsave("../figures/eveness.png", plot=last_plot(), device=NULL, path=NULL, scale=1, width=7, height=5, dpi=300, limitsize=TRUE)
+
+# Graphing Shannon Diversity - Timepoint
+p <- ggplot(diversity, aes(x=Timepoint, y=shannon, color=Timepoint)) + geom_boxplot() +
+      geom_point(aes(color=factor(Timepoint)), size=2, position = position_jitterdodge())
+shannon.tp <- p + theme_bw() + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line 
+          =element_line(colour = "black")) + 
+    theme(axis.title=element_text(vjust=1,size=14,face="bold"),
+          axis.text=element_text(size=14), axis.text.x = element_text(vjust=0.65, hjust=0.5, 
+          size=14), panel.border = element_rect(colour = "black",size=1)) + 
+    theme(axis.ticks.length=unit(0.3,"cm")) + labs(x = "", y = "Shannon Diversity Index (H')") + 
+    theme(strip.text.x = element_text(size=14, face="bold"), strip.text.y =   
+          element_text(size=14, face="bold"), strip.background = element_rect(colour="black",
+          fill="white", size=1)) 
+shannon.tp
+#ggsave("../figures/shannon_TP.png", plot=last_plot(), device=NULL, path=NULL, scale=1, width=7, height=5, dpi=300, limitsize=TRUE)
+
+# Graphing Richness - Timepoint
+p <- ggplot(diversity, aes(x=Timepoint, y=richness, color=Timepoint)) + geom_boxplot() +
+      geom_point(aes(color=factor(Timepoint)), size=2, position = position_jitterdodge())
+richness.tp<-p + theme_bw() + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line 
+          =element_line(colour = "black")) + 
+    theme(axis.title=element_text(vjust=1,size=14,face="bold"),
+          axis.text=element_text(size=14), axis.text.x = element_text(vjust=0.65, hjust=0.5, 
+          size=14), panel.border = element_rect(colour = "black",size=1)) + 
+    theme(axis.ticks.length=unit(0.3,"cm")) + labs(x = "", y = "OTU Richness") + 
+    theme(strip.text.x = element_text(size=14, face="bold"), strip.text.y =   
+          element_text(size=14, face="bold"), strip.background = element_rect(colour="black",
+          fill="white", size=1))
+richness.tp
+#ggsave("../figures/richness_TP.png", plot=last_plot(), device=NULL, path=NULL, scale=1, width=7, height=5, dpi=300, limitsize=TRUE)
+
+# Graphing Simpson's Evenness
+p <- ggplot(diversity, aes(x=Timepoint, y=simp.even, color=Timepoint)) + geom_boxplot() +
+      geom_point(aes(color=factor(Timepoint)), size=2, position = position_jitterdodge())
+evenness.tp<-p + theme_bw() + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line 
+          =element_line(colour = "black")) + 
+    theme(axis.title=element_text(vjust=1,size=14,face="bold"),
+          axis.text=element_text(size=14), axis.text.x = element_text(vjust=0.65, hjust=0.5, 
+          size=14), panel.border = element_rect(colour = "black",size=1)) + 
+    theme(axis.ticks.length=unit(0.3,"cm")) + labs(x = "Coliform Bacteria Status", y = "Simpson's Evenness") + 
+    theme(strip.text.x = element_text(size=14, face="bold"), strip.text.y =   
+          element_text(size=14, face="bold"), strip.background = element_rect(colour="black",
+          fill="white", size=1)) +
+    scale_x_discrete(breaks=c("Florence_1_Dec2018","Florence_2_March2019","Florence_3_Aug2019","Florence_4_Sept2019"), labels=c("Dec.2018", "March.2019", "Aug.2019", "Sept.2019")) + theme(legend.position="none")
+evenness.tp
+#ggsave("../figures/eveness_TP.png", plot=last_plot(), device=NULL, path=NULL, scale=1, width=7, height=5, dpi=300, limitsize=TRUE)
+```
+#combine alpha diversity graphs
+```{r Loading Files, include=FALSE}
+library("cowplot") #combining plots
+library("ggpubr")
+# remove legends and axes
+n1 <-richness + theme(legend.position="top", legend.box = "horizontal")
+n2 <- shannon + theme(legend.position="none")
+n3 <- evenness + theme(legend.position="none")
+
+# align all plots vertically
+plots <- align_plots(n1,n2,n3, align = 'v', axis = 'l')
+
+# combine moisture N process graphs
+n4 <- plot_grid(plots[[1]],plots[[2]],plots[[3]], labels = c("A","B","C"), label_size = 16, ncol=1, align='v')
+n4 
+
+ggsave("../figures/alpha_diversity.png", plot=last_plot(), device=NULL, path=NULL, scale=1, width=9, height=9, dpi=300, limitsize=TRUE)
+```
+#combine alpha diversity graphs - timepoint
+```{r Loading Files, include=FALSE}
+# remove legends and axes
+n5 <-richness.tp + theme(legend.position="top", legend.box = "horizontal")
+n6 <- shannon.tp + theme(legend.position="none")
+n7 <- evenness.tp + theme(legend.position="none")
+
+# align all plots vertically
+plots <- align_plots(n5,n6,n7, align = 'v', axis = 'l')
+
+# combine moisture N process graphs
+n8 <- plot_grid(plots[[1]],plots[[2]],plots[[3]], labels = c("A","B","C"), label_size = 16, ncol=1, align='v')
+n8
+
+ggsave("../figures/alpha_diversity.tp.png", plot=last_plot(), device=NULL, path=NULL, scale=1, width=9, height=9, dpi=300, limitsize=TRUE)
+```
+
+# Bacterial Ordinations - ColPos
 ```{r Ordination (PCoA) - Bacteria - bulk and teas, include=FALSE}
 # Principal Coordinates Analysis
-dataREL.dist <- vegdist(dataREL, method="bray")
+dataREL <- otus
+for(i in 1:dim(otus)[1]){
+  dataREL[i,] <- otus[i,]/sum(otus[i,])
+}
+
+dataREL2 <- dataREL[, colSums(dataREL) > 0.05] # dominant subset
+dataREL.dist <- vegdist(dataREL2, method="bray")
 
 pcoa <- cmdscale(dataREL.dist, k=3, eig=TRUE, add=FALSE)
   # Classical (Metric) Multidimensional Scaling; returns PCoA coordinates
@@ -107,14 +325,12 @@ explainvar1b <- round(pcoa$eig[1] / sum(pcoa$eig), 3) * 100
 explainvar2b <- round(pcoa$eig[2] / sum(pcoa$eig), 3) * 100
 sum.eigb <- sum(explainvar1b, explainvar2b)
 
-explainvar1b #4.8
-explainvar2b #4.7
-```
+explainvar1b #7.0
+explainvar2b #5.6
 
-```{r Ordination (PCoA) - Bacteria, include=FALSE}
 # Principal Coordinates Analysis
 
-pcoa.groups <- paste(new.data$Timepoint, sep = "_")
+pcoa.groups <- paste(design_final$TotCol_PA, sep = "_")
 pcoa.points <- data.frame(pcoa$points, group = pcoa.groups)
 
 # Calculate Centroids (mean and SE)
@@ -128,33 +344,63 @@ pcoa.cent.dataframe <- cbind(t(pcoa.centroids), t(pcoa.centroids.se))
 colnames(pcoa.cent.dataframe) <- c("V1", "V2", "V1e", "V2e")
 pcoa.cent.treats <- rownames(pcoa.cent.dataframe)
 pcoa.cent.dataframe.trts <- as.data.frame(pcoa.cent.dataframe)
-Timepoint <- c("Florence_1_Dec2018","Florence_2_March2019","Florence_3_Aug2019","Florence_4_Sept2019","Practice")
-pcoa.cent.dataframe.trts$Timepoint <- as.factor(Timepoint)
+ColPos <- c("negative","positive")
+pcoa.cent.dataframe.trts$ColPos <- as.factor(ColPos)
 
 #Plot
 df1a <- as.data.frame(pcoa.cent.dataframe.trts)
-plot1a <- ggplot(df1a, aes(x=V1, y=V2, colour=Date)) + theme_bw() 
+plot1a <- ggplot(df1a, aes(x=V1, y=V2, colour=ColPos)) + theme_bw() + scale_color_manual(name="Coliform Bacteria Status", values=c("gray70", "darkgreen"), labels = c("negative", "positive")) 
 plot1a + theme(panel.grid.major = element_blank(), 
                panel.grid.minor = element_blank(), 
                axis.line = element_line(colour = "black")) + 
   theme(panel.background = element_blank()) + 
-  geom_point(aes(colour=Date), size=5, stroke = 1.25, show.legend = TRUE) +
   geom_errorbarh(aes(xmax=V1+V1e, xmin=V1-V1e, height=0.01), colour="black") + 
   geom_errorbar(aes(ymax=V2+V2e, ymin=V2-V2e, width=0.01), colour="black") +
+  geom_point(aes(colour=ColPos), size=5, stroke = 1.25, show.legend = TRUE) +
   theme(axis.title = element_text(size=14), 
         axis.text = element_text(size=14),
         axis.text.x = element_text(size=14), 
         panel.border = element_rect(colour = "black", size = 1.25)) + 
   theme(axis.ticks.length = unit(0.3, "cm")) + 
-        xlab("PCoA 1 (4.8%)") + ylab("PCoA 2 (4.7%)") +
+        xlab("PCoA 1 (7.0%)") + ylab("PCoA 2 (5.6%)") +
     guides(colour = guide_legend(override.aes = list(pch=16, size = 4))) 
-ggsave("../figures/gwq_microbes.jpg", plot=last_plot(), device=NULL, path=NULL, scale=1, width=10, height=7, dpi=300, limitsize=TRUE)
+ggsave("../figures/gwq_colpos_microbes.jpg", plot=last_plot(), device=NULL, path=NULL, scale=1, width=10, height=7, dpi=300, limitsize=TRUE)
+
+#PERMANOVA
+new.data <- cbind(design_final,dataREL2)
+adonis = adonis(new.data[,-c(1:7)]~TotCol_PA, method = "bray", data = new.data, perm=1000, set.seed=42)
+adonis
+
+new.data <- cbind(design_final,dataREL2)
+adonis = adonis(new.data[,-c(1:7)]~TotCol_PA+Timepoint, method = "bray", data = new.data, perm=1000, set.seed=42)
+adonis
+
+# Principal Coordinates Analysis all points plotted
+pcoa.groups <- paste(design_final$TotCol_PA, sep = "_")
+pcoa.points <- data.frame(pcoa$points, group = pcoa.groups)
+
+#Plot
+plot1a <- ggplot(pcoa.points, aes(x=X1, y=X2, colour=group)) + theme_bw()+ scale_color_manual(name="Coliform Bacteria Status", values=c("gray70", "darkgreen"), labels = c("negative", "positive")) 
+plot1a + theme(panel.grid.major = element_blank(), 
+               panel.grid.minor = element_blank(), 
+               axis.line = element_line(colour = "black")) + 
+  theme(panel.background = element_blank()) + 
+  geom_point(aes(colour=group), size=4, stroke = 1.25, show.legend = TRUE) +
+  theme(axis.title = element_text(size=14), 
+        axis.text = element_text(size=14),
+        axis.text.x = element_text(size=14), 
+        panel.border = element_rect(colour = "black", size = 1.25)) + 
+  theme(axis.ticks.length = unit(0.3, "cm")) + 
+        xlab("PCoA 1 (7.0%)") + ylab("PCoA 2 (5.6%)") +
+    guides(colour = guide_legend(override.aes = list(pch=16, size = 4))) 
+ggsave("../figures/gwq_colpos_microbes_ALL.jpg", plot=last_plot(), device=NULL, path=NULL, scale=1, width=10, height=7, dpi=300, limitsize=TRUE)
 ```
-# Bacterial community indicator species
+# Bacterial community indicator species - ColPos
 ```{r Bacteria Indicator Species, include=FALSE}
 library("labdsv")
-design.type <- new.data$Timepoint
-dataREL.t <- new.data[,-c(1:6)]
+#new.data <- cbind(design_final,dataREL2)
+design.type <- new.data$TotCol_PA
+dataREL.t <- new.data[,-c(1:7)]
 
 dataREL <- dataREL.t[, colSums(dataREL.t) > 0.05]
 bac.ind <- indval(dataREL, design.type)
@@ -183,6 +429,110 @@ table(indicator.bac$Cluster)
 levels(design.type)
 
 # Export Bacteria Indicator Table
-write.table(indicator.bac, "../data/BacterialIndicators.txt",
+write.table(indicator.bac, "../data/BacterialIndicators_ColPos.txt",
             sep="\t", row.names = F, quote = F)
+```
+# Bacterial Ordinations - Timepoints
+```{r Ordination (PCoA) - Bacteria - bulk and teas, include=FALSE}
+# Principal Coordinates Analysis
+pcoa.groups <- paste(new.data$Timepoint, sep = "_")
+pcoa.points <- data.frame(pcoa$points, group = pcoa.groups)
+
+# Calculate Centroids (mean and SE)
+pcoa.L.centroids <- melt(pcoa.points, id="group", measure.vars = c("X1", "X2"))
+pcoa.centroids <- acast(pcoa.L.centroids, variable ~ group, mean)
+pcoa.centroids.se <- acast(pcoa.L.centroids, variable ~ group, se)
+pcoa.centroids.sd <- acast(pcoa.L.centroids, variable ~ group, sd)
+
+# Combine
+pcoa.cent.dataframe <- cbind(t(pcoa.centroids), t(pcoa.centroids.se))
+colnames(pcoa.cent.dataframe) <- c("V1", "V2", "V1e", "V2e")
+pcoa.cent.treats <- rownames(pcoa.cent.dataframe)
+pcoa.cent.dataframe.trts <- as.data.frame(pcoa.cent.dataframe)
+Timepoint <- c("Florence_1_Dec2018","Florence_2_March2019","Florence_3_Aug2019","Florence_4_Sept2019")
+pcoa.cent.dataframe.trts$Timepoint <- as.factor(Timepoint)
+
+#Plot
+df1a <- as.data.frame(pcoa.cent.dataframe.trts)
+plot1a <- ggplot(df1a, aes(x=V1, y=V2, colour=Timepoint)) + theme_bw() 
+plot1a + theme(panel.grid.major = element_blank(), 
+               panel.grid.minor = element_blank(), 
+               axis.line = element_line(colour = "black")) + 
+  theme(panel.background = element_blank()) + 
+    geom_errorbarh(aes(xmax=V1+V1e, xmin=V1-V1e, height=0.01), colour="black") + 
+    geom_errorbar(aes(ymax=V2+V2e, ymin=V2-V2e, width=0.01), colour="black") +
+    geom_point(aes(colour=Timepoint), size=5, stroke = 1.25, show.legend = TRUE) +
+  theme(axis.title = element_text(size=14), 
+        axis.text = element_text(size=14),
+        axis.text.x = element_text(size=14), 
+        panel.border = element_rect(colour = "black", size = 1.25)) + 
+  theme(axis.ticks.length = unit(0.3, "cm")) + 
+        xlab("PCoA 1 (7.0%)") + ylab("PCoA 2 (5.6%)") +
+    guides(colour = guide_legend(override.aes = list(pch=16, size = 4))) 
+ggsave("../figures/gwq_microbes_Timepoint.jpg", plot=last_plot(), device=NULL, path=NULL, scale=1, width=10, height=7, dpi=300, limitsize=TRUE)
+```
+# Bacterial community indicator species
+```{r Bacteria Indicator Species, include=FALSE}
+library("labdsv")
+new.data <- cbind(design_final,dataREL2)
+design.type <- new.data$Timepoint
+design.type <-droplevels(new.data$Timepoint)
+dataREL.t <- new.data[,-c(1:7)]
+
+dataREL2 <- dataREL.t[, colSums(dataREL.t) > 0.05]
+#Timepoint <- c("Florence_1_Dec2018","Florence_2_March2019","Florence_3_Aug2019","Florence_4_Sept2019")
+bac.ind <- indval(dataREL2, design.type)
+
+summary(bac.ind)
+
+inds <- which(bac.ind$pval <= 0.05)
+bac.indicators <- as.data.frame(matrix(NA, nrow = length(inds), ncol = 4))
+colnames(bac.indicators) <- c("OTU", "Cluster", "IndVal", "Prob")
+
+bac.indicators$OTU <- names(inds)
+bac.indicators$Cluster <- bac.ind$maxcls[inds]
+bac.indicators$IndVal <- bac.ind$indcls[inds]
+bac.indicators$Prob <- bac.ind$pval[inds]
+
+ind.tax <- otu.tax[which(as.character(otu.tax$OTU) %in% bac.indicators$OTU), ]
+ind.tax <- ind.tax[match(ind.tax$OTU, bac.indicators$OTU), ]
+
+indicator.bac <- cbind(bac.indicators, ind.tax[, -c(1)])
+
+indicator.bac <- indicator.bac[order(as.numeric(indicator.bac$Cluster)), ]
+
+table(indicator.bac$Cluster)
+table(indicator.bac$Phylum)
+table(indicator.bac$Cluster)
+levels(design.type)
+
+# Export Bacteria Indicator Table
+write.table(indicator.bac, "../data/BacterialIndicators_Timepoint.txt",
+            sep="\t", row.names = F, quote = F)
+```
+# Simple Hypothesis Testing - Microbes
+```{r redundancy analysis - Bacteria, echo=TRUE}
+# RDA (full data - works)
+new.data <-cbind(design,dataREL)
+rda.2 <- rda(decostand(otus, "hell") ~  nitrate+Timepoint+TotCol_PA, data=design, na=na.omit)
+RsquareAdj(rda.2)
+
+# TEST SUBSET DATA (works)
+otus.sub <- otus[(1:10),(1:10)]
+design.sub <- design[(1:10),]
+dataREL.sub <- otus.sub
+for(i in 1:dim(otus.sub)[1]){
+  dataREL.sub[i,] <- otus.sub[i,]/sum(otus.sub[i,])
+} 
+
+rda(dataREL.sub ~ nitrate, data=design.sub, na=na.omit)
+
+new.data <-cbind(design.sub,dataREL.sub)
+adonis = adonis(new.data[,-c(1:7)]~nitrate, method = "bray", data = new.data, perm=1000)
+adonis
+
+rda(otus.sub ~ nitrate, data=design.sub)
+
+rda.1 <- rda(decostand(otus.sub, "hell") ~  nitrate, data=design.sub)
+RsquareAdj(rda.1)
 ```
